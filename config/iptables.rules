@@ -1,0 +1,46 @@
+# Campus gateway firewall (loaded on the router with iptables-restore)
+#   eth1 = Student   10.10.10.0/24
+#   eth2 = Faculty   10.10.20.0/24
+#   eth3 = IT Admin  10.10.30.0/24
+#   eth4 = Services  10.10.40.0/24
+# Rules are evaluated top-down; the first match wins.
+*filter
+:INPUT ACCEPT [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+
+# --- Traffic addressed to the router itself --------------------------------
+# Policy 2: only IT Admin may SSH to the gateway.
+-A INPUT -i eth1 -p tcp -m tcp --dport 22 -j DROP
+-A INPUT -i eth2 -p tcp -m tcp --dport 22 -j DROP
+-A INPUT -i eth4 -p tcp -m tcp --dport 22 -j DROP
+
+# --- Anti-spoofing: source address must match the arrival interface --------
+-A FORWARD -i eth1 ! -s 10.10.10.0/24 -j DROP
+-A FORWARD -i eth2 ! -s 10.10.20.0/24 -j DROP
+-A FORWARD -i eth3 ! -s 10.10.30.0/24 -j DROP
+-A FORWARD -i eth4 ! -s 10.10.40.0/24 -j DROP
+
+# --- Policy 1: stateful filtering ------------------------------------------
+-A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+-A FORWARD -m conntrack --ctstate INVALID -j DROP
+
+# --- Policy 2: SSH only from IT Admin --------------------------------------
+-A FORWARD -i eth3 -s 10.10.30.0/24 -d 10.10.0.0/16 -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+-A FORWARD -p tcp -m tcp --dport 22 -j DROP
+
+# --- Policy 3a: bulletin app, through the WAF only -------------------------
+-A FORWARD -s 10.10.10.0/24 -d 10.10.40.80/32 -p tcp -m tcp --dport 8080 -m conntrack --ctstate NEW -j ACCEPT
+-A FORWARD -s 10.10.20.0/24 -d 10.10.40.80/32 -p tcp -m tcp --dport 8080 -m conntrack --ctstate NEW -j ACCEPT
+-A FORWARD -s 10.10.30.0/24 -d 10.10.40.80/32 -p tcp -m tcp --dport 8080 -m conntrack --ctstate NEW -j ACCEPT
+# No direct client access to the backend container.
+-A FORWARD -d 10.10.40.81/32 -j DROP
+
+# --- Policy 3b: grading database -------------------------------------------
+-A FORWARD -s 10.10.20.0/24 -d 10.10.40.100/32 -p tcp -m tcp --dport 5432 -m conntrack --ctstate NEW -j ACCEPT
+-A FORWARD -s 10.10.30.0/24 -d 10.10.40.100/32 -p tcp -m tcp --dport 5432 -m conntrack --ctstate NEW -j ACCEPT
+# Explicit drop (Student and everyone else) so the packet counter is visible.
+-A FORWARD -d 10.10.40.100/32 -p tcp -m tcp --dport 5432 -j DROP
+
+# Anything not matched above hits the default FORWARD DROP policy.
+COMMIT

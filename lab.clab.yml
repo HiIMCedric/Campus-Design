@@ -1,0 +1,169 @@
+name: campus-network-security
+
+# NOTES ON EXEC ORDER
+#  * Containerlab runs exec lines without a shell; anything needing "&&" or
+#    redirection is wrapped in sh -c "...".
+#  * Every node starts with a default route on eth0 (Containerlab management
+#    network). Packages are installed over eth0 FIRST, then the campus gateway
+#    takes over with "ip route replace".
+#  * Clients shut eth0 down afterwards, so they cannot bypass the firewall
+#    through the management network.
+
+topology:
+  nodes:
+    # 1. Central Router / Firewall Node
+    router:
+      kind: linux
+      image: alpine:latest
+      binds:
+        - config/iptables.rules:/etc/iptables.rules:ro
+      exec:
+        - apk add --no-cache iptables
+        # Keep forwarding off until the firewall policy is loaded.
+        - sysctl -w net.ipv4.ip_forward=0
+        - ip addr add 10.10.10.1/24 dev eth1
+        - ip addr add 10.10.20.1/24 dev eth2
+        - ip addr add 10.10.30.1/24 dev eth3
+        - ip addr add 10.10.40.1/24 dev eth4
+        - ip link set eth1 up
+        - ip link set eth2 up
+        - ip link set eth3 up
+        - ip link set eth4 up
+        # Fail closed: forwarding is enabled only if the rules load cleanly.
+        - sh -c "iptables-restore < /etc/iptables.rules && sysctl -w net.ipv4.ip_forward=1"
+
+    # 2. Alpine Linux Layer-2 Switches per Subnet
+    #    eth1 = uplink to router, eth2+ = access ports
+    sw-student:
+      kind: linux
+      image: alpine:latest
+      exec:
+        - apk add --no-cache iproute2
+        - ip link add name br0 type bridge
+        - ip link set eth1 master br0
+        - ip link set eth2 master br0
+        - ip link set eth1 up
+        - ip link set eth2 up
+        - ip link set br0 up
+
+    sw-faculty:
+      kind: linux
+      image: alpine:latest
+      exec:
+        - apk add --no-cache iproute2
+        - ip link add name br0 type bridge
+        - ip link set eth1 master br0
+        - ip link set eth2 master br0
+        - ip link set eth1 up
+        - ip link set eth2 up
+        - ip link set br0 up
+
+    sw-admin:
+      kind: linux
+      image: alpine:latest
+      exec:
+        - apk add --no-cache iproute2
+        - ip link add name br0 type bridge
+        - ip link set eth1 master br0
+        - ip link set eth2 master br0
+        - ip link set eth1 up
+        - ip link set eth2 up
+        - ip link set br0 up
+
+    sw-services:
+      kind: linux
+      image: alpine:latest
+      exec:
+        - apk add --no-cache iproute2
+        - ip link add name br0 type bridge
+        - ip link set eth1 master br0
+        - ip link set eth2 master br0
+        - ip link set eth3 master br0
+        - ip link set eth4 master br0
+        - ip link set eth1 up
+        - ip link set eth2 up
+        - ip link set eth3 up
+        - ip link set eth4 up
+        - ip link set br0 up
+
+    # 3. Subnet Clients
+    student-client:
+      kind: linux
+      image: alpine:latest
+      exec:
+        - apk add --no-cache curl netcat-openbsd
+        - ip addr add 10.10.10.10/24 dev eth1
+        - ip link set eth1 up
+        - ip route replace default via 10.10.10.1
+        - ip link set eth0 down
+
+    faculty-client:
+      kind: linux
+      image: alpine:latest
+      exec:
+        - apk add --no-cache curl netcat-openbsd
+        - ip addr add 10.10.20.10/24 dev eth1
+        - ip link set eth1 up
+        - ip route replace default via 10.10.20.1
+        - ip link set eth0 down
+
+    admin-client:
+      kind: linux
+      image: alpine:latest
+      exec:
+        - apk add --no-cache curl netcat-openbsd
+        - ip addr add 10.10.30.10/24 dev eth1
+        - ip link set eth1 up
+        - ip route replace default via 10.10.30.1
+        - ip link set eth0 down
+
+    # 4. Centralized Services Subnet
+    waf-proxy:
+      kind: linux
+      image: custom-waf:latest
+      env:
+        BACKEND: "http://10.10.40.81:3000"
+        MODSEC_RULE_ENGINE: "On"
+      binds:
+        - config/modsec-custom.conf:/etc/modsecurity.d/owasp-crs/rules/RESPONSE-999-CUSTOM.conf:ro
+      exec:
+        - ip addr add 10.10.40.80/24 dev eth1
+        - ip link set eth1 up
+        - ip route replace default via 10.10.40.1
+
+    juiceshop-app:
+      kind: linux
+      image: custom-juiceshop:latest
+      exec:
+        - ip addr add 10.10.40.81/24 dev eth1
+        - ip link set eth1 up
+        - ip route replace default via 10.10.40.1
+
+    postgres-db:
+      kind: linux
+      image: postgres:15-alpine
+      env:
+        POSTGRES_USER: postgres
+        POSTGRES_PASSWORD: postgres
+        POSTGRES_DB: grading_db
+      exec:
+        - apk add --no-cache iproute2
+        - ip addr add 10.10.40.100/24 dev eth1
+        - ip link set eth1 up
+        - ip route replace default via 10.10.40.1
+
+  links:
+    # Student subnet
+    - endpoints: ["router:eth1", "sw-student:eth1"]
+    - endpoints: ["student-client:eth1", "sw-student:eth2"]
+    # Faculty subnet
+    - endpoints: ["router:eth2", "sw-faculty:eth1"]
+    - endpoints: ["faculty-client:eth1", "sw-faculty:eth2"]
+    # IT Admin subnet
+    - endpoints: ["router:eth3", "sw-admin:eth1"]
+    - endpoints: ["admin-client:eth1", "sw-admin:eth2"]
+    # Services subnet
+    - endpoints: ["router:eth4", "sw-services:eth1"]
+    - endpoints: ["waf-proxy:eth1", "sw-services:eth2"]
+    - endpoints: ["juiceshop-app:eth1", "sw-services:eth3"]
+    - endpoints: ["postgres-db:eth1", "sw-services:eth4"]
